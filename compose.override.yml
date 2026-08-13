@@ -38,10 +38,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     command:
-      - fastapi
-      - dev
-      - --host
-      - "0.0.0.0"
+      - bash
+      - -c
+      - bash /app/backend/scripts/prestart.sh && exec fastapi dev --host 0.0.0.0
     volumes:
       - ./backend:/app/backend
       - ./backend/htmlcov:/app/backend/htmlcov

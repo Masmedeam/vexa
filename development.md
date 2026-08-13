@@ -55,8 +55,10 @@ The build is written to `backend/app/frontend` and served by FastAPI at <http://
 ## Full Stack with Docker Compose and hot reload
 
 The local Compose override now runs FastAPI and Vite as separate development
-services. Source folders are mounted into the containers, so Python changes
-reload the backend and frontend changes use Vite HMR.
+services. On every backend start it waits for PostgreSQL, applies
+`alembic upgrade head`, and initializes the first user before starting FastAPI.
+Source folders are mounted into the containers, so Python changes reload the
+backend and frontend changes use Vite HMR.
 
 ```bash
 docker compose up --build
@@ -76,7 +78,10 @@ Mailcatcher: <http://localhost:1080>
 
 Stop a locally running FastAPI server before starting the Compose backend because both use port `8000`.
 
-**Note**: The first time you start the stack, it might take a minute for all the services to be ready. To monitor it, use `docker compose logs`, or `docker compose logs backend` for the backend service.
+**Note**: The first time you start the stack, it might take a minute for the
+database migrations and all services to become ready. To monitor it, use
+`docker compose logs`, or `docker compose logs backend` for the backend
+service. The development startup now initializes a fresh database automatically.
 
 ## Mailcatcher
 
