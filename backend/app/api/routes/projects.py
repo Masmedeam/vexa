@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from io import BytesIO
+import json
+from urllib.parse import urlparse
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
@@ -46,6 +48,9 @@ from app.models import (
     TestCaseRequirement,
     TraceabilityRequirement,
     TraceabilityCase,
+    VisualReference,
+    VisualReferencePublic,
+    VisualReferenceUpdate,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -56,6 +61,17 @@ REVIEW_STATUSES = {"pending", "approved", "rejected", "needs_changes"}
 EXECUTION_STATUSES = {"not_started", "in_progress", "passed", "failed", "blocked"}
 STEP_STATUSES = {"not_started", "in_progress", "completed", "blocked"}
 STEP_EXECUTION_STATUSES = {"not_started", "in_progress", "passed", "failed", "blocked"}
+
+
+class VisualSearchRequest(BaseModel):
+    query: str
+    case_id: uuid.UUID | None = None
+    step_id: uuid.UUID | None = None
+
+
+class VisualSearchResponse(BaseModel):
+    query: str
+    references: list[VisualReferencePublic]
 
 
 class ProjectGenerationResponse(BaseModel):
@@ -173,6 +189,71 @@ def read_traceability(session: SessionDep, current_user: CurrentUser, project_id
             linked_cases.append(TraceabilityCase(id=case.id, test_case_id=case.test_case_id, title=case.title, stage=stage.stage if stage else "—", step_count=len(protocol_steps), completed_steps=completed, execution_status=execution_status, review_status=reviews[0].status if reviews else None))
         result.append(TraceabilityRequirement(id=requirement.id, requirement_id=requirement.requirement_id, requirement_text=requirement.requirement_text, source_location=requirement.source_location, cases=linked_cases))
     return result
+
+
+@router.get("/{project_id}/visuals", response_model=list[VisualReferencePublic])
+def read_visuals(session: SessionDep, current_user: CurrentUser, project_id: uuid.UUID, case_id: uuid.UUID | None = None, step_id: uuid.UUID | None = None) -> list[VisualReference]:
+    _project_or_404(session, current_user, project_id)
+    statement = select(VisualReference).where(VisualReference.project_id == project_id).order_by(col(VisualReference.created_at).desc())
+    if case_id:
+        statement = statement.where(VisualReference.generated_test_case_id == case_id)
+    if step_id:
+        statement = statement.where(VisualReference.test_case_step_id == step_id)
+    return list(session.exec(statement).all())
+
+
+@router.post("/{project_id}/visuals/search", response_model=VisualSearchResponse)
+async def search_visuals(*, session: SessionDep, current_user: CurrentUser, project_id: uuid.UUID, request: VisualSearchRequest) -> VisualSearchResponse:
+    _project_or_404(session, current_user, project_id)
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Visual search is not configured")
+    case = session.get(GeneratedTestCase, request.case_id) if getattr(request, "case_id", None) else None
+    if request.step_id:
+        protocol_step = session.get(TestCaseStep, request.step_id)
+        if not protocol_step:
+            raise HTTPException(status_code=404, detail="Protocol step not found")
+        if case and protocol_step.generated_test_case_id != case.id:
+            raise HTTPException(status_code=400, detail="Step does not belong to case")
+    prompt = f"""Find 3 authoritative, educational visual references for this GxP qualification workflow step: {request.query}. Search the web. Prefer official manufacturer documentation, standards organizations, universities, or Wikimedia Commons. Return only JSON with a references array. Each item must contain title, source_url, image_url (null if no direct image URL is available), snippet, and publisher. Do not invent URLs. Visuals guide the operator only and are never acceptance evidence."""
+    from openai import AsyncOpenAI, APIStatusError
+    try:
+        response = await AsyncOpenAI(api_key=settings.OPENAI_API_KEY).responses.create(model=settings.OPENAI_MODEL, tools=[{"type": "web_search"}], input=prompt)
+        raw = response.output_text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+        data = json.loads(raw)
+    except (APIStatusError, json.JSONDecodeError, ValueError) as error:
+        raise HTTPException(status_code=502, detail="Visual search did not return valid references") from error
+    stored: list[VisualReference] = []
+    for item in data.get("references", [])[:6]:
+        source_url = str(item.get("source_url", ""))
+        parsed = urlparse(source_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        image_url = item.get("image_url")
+        if image_url and (urlparse(str(image_url)).scheme not in {"http", "https"}):
+            image_url = None
+        record = VisualReference(project_id=project_id, generated_test_case_id=request.case_id, test_case_step_id=request.step_id, query=request.query, title=str(item.get("title", "Visual reference"))[:500], source_url=source_url, image_url=str(image_url)[:2000] if image_url else None, snippet=str(item.get("snippet", ""))[:4000], publisher=str(item.get("publisher", ""))[:255])
+        session.add(record)
+        stored.append(record)
+    session.commit()
+    for item in stored:
+        session.refresh(item)
+    return VisualSearchResponse(query=request.query, references=[VisualReferencePublic.model_validate(item) for item in stored])
+
+
+@router.patch("/{project_id}/visuals/{visual_id}", response_model=VisualReferencePublic)
+def update_visual(*, session: SessionDep, current_user: CurrentUser, project_id: uuid.UUID, visual_id: uuid.UUID, visual_in: VisualReferenceUpdate) -> VisualReference:
+    _project_or_404(session, current_user, project_id)
+    visual = session.get(VisualReference, visual_id)
+    if not visual or visual.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Visual reference not found")
+    visual.sqlmodel_update(visual_in.model_dump(exclude_unset=True))
+    visual.updated_at = datetime.now(UTC)
+    session.add(visual)
+    session.commit()
+    session.refresh(visual)
+    return visual
 
 
 @router.get("/{project_id}", response_model=ProjectPublic)

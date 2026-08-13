@@ -456,6 +456,42 @@ class GenerationFeedback(SQLModel, table=True):
     updated_at: datetime | None = Field(default_factory=get_datetime_utc, sa_type=DateTime(timezone=True))
 
 
+class VisualReference(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: uuid.UUID = Field(foreign_key="project.id", nullable=False, ondelete="CASCADE", index=True)
+    generated_test_case_id: uuid.UUID | None = Field(default=None, foreign_key="generatedtestcase.id", ondelete="CASCADE", index=True)
+    test_case_step_id: uuid.UUID | None = Field(default=None, foreign_key="testcasestep.id", ondelete="CASCADE", index=True)
+    query: str = Field(max_length=1000)
+    title: str = Field(max_length=500)
+    source_url: str = Field(max_length=2000)
+    image_url: str | None = Field(default=None, max_length=2000)
+    snippet: str | None = Field(default=None, max_length=4000)
+    publisher: str | None = Field(default=None, max_length=255)
+    selected: bool = False
+    created_at: datetime | None = Field(default_factory=get_datetime_utc, sa_type=DateTime(timezone=True))
+    updated_at: datetime | None = Field(default_factory=get_datetime_utc, sa_type=DateTime(timezone=True))
+
+
+class VisualReferencePublic(SQLModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    generated_test_case_id: uuid.UUID | None = None
+    test_case_step_id: uuid.UUID | None = None
+    query: str
+    title: str
+    source_url: str
+    image_url: str | None = None
+    snippet: str | None = None
+    publisher: str | None = None
+    selected: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class VisualReferenceUpdate(SQLModel):
+    selected: bool | None = None
+
+
 # Generic message
 class Message(SQLModel):
     message: str

@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     FASTAPI_ENV: Literal["development"] | None = None
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-5.4-mini"
+    OPENAI_REALTIME_MODEL: str = "gpt-realtime"
+    OPENAI_REALTIME_VOICE: str = "marin"
 
     PROJECT_NAME: str
     SENTRY_DSN: HttpUrl | None = None

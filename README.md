@@ -34,6 +34,12 @@ The generation service:
 
 The OpenAI Responses API returns structured JSON. Vexa stores the original payload on the generated test case and also normalizes its contents into database records so individual cases, steps, reviews, executions, evidence, and mappings can be updated independently.
 
+## Voice and visual guidance
+
+Generated test-case cards include a Voice control. It opens an authenticated WebRTC session with the OpenAI Realtime API using a short-lived server-created session exchange; the browser never receives the standard OpenAI API key. The assistant receives the active case and protocol-step context and can call validated application operations to start steps, record pass/fail results, review a case, complete a qualification stage, and search for step-specific visuals. Successful function calls refresh the workflow UI immediately.
+
+Visual search uses the Responses API web-search tool to find educational references for a protocol step. Vexa stores the query, title, source URL, optional direct image URL, publisher, and snippet in `VisualReference` records. References are guidance only, retain their source attribution, and are never treated as execution evidence or acceptance criteria.
+
 ## Data model
 
 ```text
@@ -70,6 +76,8 @@ The API is protected by JWT authentication except for authentication and health 
 | `/api/v1/projects/{id}/test-cases/{case}/steps/{step}/executions` | Record step execution results |
 | `/api/v1/projects/{id}/traceability` | Map URS requirements to generated cases and stages |
 | `/api/v1/projects/{id}/feedback` | Store generation and workflow feedback |
+| `/api/v1/realtime/session` | Create an authenticated WebRTC Realtime session |
+| `/api/v1/projects/{id}/visuals` | List, search, and select visual guidance references |
 
 Interactive API documentation is available at `http://localhost:8000/docs` when the stack is running.
 
