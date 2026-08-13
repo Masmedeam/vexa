@@ -1,0 +1,45 @@
+.vscode/*
+!.vscode/extensions.json
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.template
+*.local
+
+# OS, editor, and agent-local files
+.DS_Store
+.idea/
+.agents/
+.claude/
+
+# Python caches, virtual environments, and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+.cache/
+.venv/
+venv/
+
+# Local databases and private key material
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.p12
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+backend/app/frontend/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
