@@ -5,6 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from openai import APIStatusError
 
 from app.api.deps import CurrentUser
 from app.core.config import settings
@@ -146,6 +147,18 @@ or commentary. The object must contain one or more test_cases. This is a draft p
 human review and must never state that a test has passed or that a system is compliant."""
 
 
+def _openai_generation_error(error: APIStatusError) -> HTTPException:
+    body = error.body if isinstance(error.body, dict) else {}
+    code = body.get("code")
+    if error.status_code == 429 and code == "insufficient_quota":
+        return HTTPException(status_code=429, detail="OpenAI credits are exhausted. Add API credits or use a project key with available quota, then try again.")
+    if error.status_code == 429:
+        return HTTPException(status_code=429, detail="OpenAI is rate-limiting generation. Wait briefly and try again.")
+    if error.status_code in {401, 403}:
+        return HTTPException(status_code=502, detail="OpenAI rejected the configured API key or project permissions.")
+    return HTTPException(status_code=502, detail="OpenAI could not generate the test cases.")
+
+
 def _demo_test_cases() -> list[TestCase]:
     return [
         TestCase(
@@ -190,13 +203,16 @@ async def generate_cases_from_documents(
     if not settings.OPENAI_API_KEY:
         return _demo_test_cases(), "demo"
 
-    from openai import APIStatusError, AsyncOpenAI
+    from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     uploaded_files = []
-    for filename, content, document_type in documents:
-        uploaded = await client.files.create(file=(filename, BytesIO(content)), purpose="user_data")
-        uploaded_files.append((uploaded.id, filename, document_type))
+    try:
+        for filename, content, document_type in documents:
+            uploaded = await client.files.create(file=(filename, BytesIO(content)), purpose="user_data")
+            uploaded_files.append((uploaded.id, filename, document_type))
+    except APIStatusError as error:
+        raise _openai_generation_error(error) from error
     stage_instruction = (
         f"Generate test cases only for the {stage} qualification stage. Do not create cases for any other stage.\n"
         if stage
@@ -219,7 +235,7 @@ async def generate_cases_from_documents(
             },
         )
     except APIStatusError as error:
-        raise HTTPException(status_code=502, detail="OpenAI could not generate the test cases.") from error
+        raise _openai_generation_error(error) from error
     try:
         generated = GeneratorOutput.model_validate_json(response.output_text)
     except (ValidationError, ValueError) as error:

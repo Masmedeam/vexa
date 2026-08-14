@@ -103,6 +103,19 @@ After changing `.env` variables, restart the backend so Compose passes the new v
 docker compose up -d --force-recreate backend
 ```
 
+Realtime voice uses the cost-efficient `gpt-realtime-mini` model by default. To override it,
+set these values in the local `.env` file and recreate the backend:
+
+```bash
+OPENAI_REALTIME_MODEL=gpt-realtime-mini
+OPENAI_REALTIME_VOICE=marin
+docker compose up -d --force-recreate backend
+```
+
+The OpenAI project must have Realtime access and available credits. Check that the configured
+key can see a Realtime model before testing voice; a key that can call text models may still lack
+Realtime access.
+
 For a clean smoke test:
 
 ```bash

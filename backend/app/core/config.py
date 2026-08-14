@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     FASTAPI_ENV: Literal["development"] | None = None
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-5.4-mini"
-    OPENAI_REALTIME_MODEL: str = "gpt-realtime"
+    # Cost-efficient Realtime model; override per environment when needed.
+    OPENAI_REALTIME_MODEL: str = "gpt-realtime-mini"
     OPENAI_REALTIME_VOICE: str = "marin"
 
     PROJECT_NAME: str

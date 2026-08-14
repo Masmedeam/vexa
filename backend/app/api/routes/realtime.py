@@ -63,5 +63,22 @@ Rules:\n- Be concise and calm. Never claim regulatory compliance or that a test 
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail="Unable to create realtime voice session") from error
     if not response.is_success:
-        raise HTTPException(status_code=502, detail=f"OpenAI rejected the realtime voice session ({response.status_code})")
+        error_body: dict = {}
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict):
+                error_body = parsed.get("error", parsed)
+        except ValueError:
+            pass
+        error_code = error_body.get("code")
+        if response.status_code in {401, 403} or error_code in {"model_not_found", "model_not_available"}:
+            detail = (
+                f"Realtime model '{settings.OPENAI_REALTIME_MODEL}' is not available to this OpenAI project. "
+                "Enable Realtime access or set OPENAI_REALTIME_MODEL to an enabled Realtime model."
+            )
+        elif response.status_code == 429 and error_code in {"insufficient_quota", "credit_balance_exhausted"}:
+            detail = "OpenAI Realtime is unavailable because this project has no remaining API credits."
+        else:
+            detail = f"OpenAI rejected the realtime voice session ({response.status_code})."
+        raise HTTPException(status_code=502, detail=detail)
     return response.text
