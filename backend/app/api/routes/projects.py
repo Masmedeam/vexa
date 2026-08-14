@@ -1,53 +1,55 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from io import BytesIO
-import json
-from urllib.parse import urlparse
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.api.routes.test_scripts import TestCase, generate_cases_from_documents
 from app.core.config import settings
 from app.models import (
+    DocumentVersion,
+    DocumentVersionPublic,
     GeneratedTestCase,
     GeneratedTestCasePublic,
+    GenerationFeedback,
     GenerationRun,
     Project,
     ProjectCreate,
     ProjectDocument,
     ProjectDocumentPublic,
-    DocumentVersion,
-    DocumentVersionPublic,
     ProjectPublic,
     ProjectsPublic,
     ProjectUpdate,
     QualificationStep,
     QualificationStepPublic,
     QualificationStepUpdate,
-    GenerationFeedback,
+    TestCaseRequirement,
     TestCaseReview,
     TestCaseReviewPublic,
     TestCaseReviewUpdate,
-    TestExecution,
-    TestExecutionPublic,
-    TestExecutionUpdate,
-    TestEvidence,
     TestCaseStep,
     TestCaseStepPublic,
     TestCaseStepUpdate,
+    TestEvidence,
+    TestExecution,
+    TestExecutionPublic,
+    TestExecutionUpdate,
     TestStepExecution,
     TestStepExecutionPublic,
     TestStepExecutionUpdate,
-    UrsRequirement,
-    TestCaseRequirement,
-    TraceabilityRequirement,
     TraceabilityCase,
+    TraceabilityRequirement,
+    UrsRequirement,
     VisualReference,
     VisualReferencePublic,
     VisualReferenceUpdate,
@@ -72,6 +74,21 @@ class VisualSearchRequest(BaseModel):
 class VisualSearchResponse(BaseModel):
     query: str
     references: list[VisualReferencePublic]
+
+
+async def _reachable_url(client: httpx.AsyncClient, value: str, image: bool = False) -> bool:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    try:
+        response = await client.head(value)
+        if response.status_code in {405, 403}:
+            response = await client.get(value)
+        if not 200 <= response.status_code < 400:
+            return False
+        return not image or response.headers.get("content-type", "").lower().startswith("image/")
+    except httpx.HTTPError:
+        return False
 
 
 class ProjectGenerationResponse(BaseModel):
@@ -207,15 +224,24 @@ async def search_visuals(*, session: SessionDep, current_user: CurrentUser, proj
     _project_or_404(session, current_user, project_id)
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="Visual search is not configured")
-    case = session.get(GeneratedTestCase, request.case_id) if getattr(request, "case_id", None) else None
+    case = session.get(GeneratedTestCase, request.case_id) if request.case_id else None
+    case_step = session.get(QualificationStep, case.step_id) if case else None
+    if request.case_id and (not case or not case_step or case_step.project_id != project_id):
+        raise HTTPException(status_code=404, detail="Test case not found")
     if request.step_id:
         protocol_step = session.get(TestCaseStep, request.step_id)
         if not protocol_step:
             raise HTTPException(status_code=404, detail="Protocol step not found")
         if case and protocol_step.generated_test_case_id != case.id:
             raise HTTPException(status_code=400, detail="Step does not belong to case")
-    prompt = f"""Find 3 authoritative, educational visual references for this GxP qualification workflow step: {request.query}. Search the web. Prefer official manufacturer documentation, standards organizations, universities, or Wikimedia Commons. Return only JSON with a references array. Each item must contain title, source_url, image_url (null if no direct image URL is available), snippet, and publisher. Do not invent URLs. Visuals guide the operator only and are never acceptance evidence."""
-    from openai import AsyncOpenAI, APIStatusError
+    prompt = f"""Find up to 3 authoritative, educational visual references or tutorial pages for this GxP qualification test case. Search the web and use only URLs returned by search results. Prefer official manufacturer documentation, standards organizations, universities, or Wikimedia Commons. The result must help an operator understand the equipment, interface, or procedure described below.
+
+Test case: {case.title if case else 'Qualification protocol'}
+Protocol context:
+{request.query}
+
+Return only JSON with a references array. Each item must contain title, source_url, image_url (null if no directly reachable image exists), snippet, and publisher. Use a tutorial/documentation page as source_url when it is more useful than an image. Never invent or guess URLs. Visuals guide the operator only and are never acceptance evidence."""
+    from openai import APIStatusError, AsyncOpenAI
     try:
         response = await AsyncOpenAI(api_key=settings.OPENAI_API_KEY).responses.create(model=settings.OPENAI_MODEL, tools=[{"type": "web_search"}], input=prompt)
         raw = response.output_text.strip()
@@ -225,17 +251,17 @@ async def search_visuals(*, session: SessionDep, current_user: CurrentUser, proj
     except (APIStatusError, json.JSONDecodeError, ValueError) as error:
         raise HTTPException(status_code=502, detail="Visual search did not return valid references") from error
     stored: list[VisualReference] = []
-    for item in data.get("references", [])[:6]:
-        source_url = str(item.get("source_url", ""))
-        parsed = urlparse(source_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            continue
-        image_url = item.get("image_url")
-        if image_url and (urlparse(str(image_url)).scheme not in {"http", "https"}):
-            image_url = None
-        record = VisualReference(project_id=project_id, generated_test_case_id=request.case_id, test_case_step_id=request.step_id, query=request.query, title=str(item.get("title", "Visual reference"))[:500], source_url=source_url, image_url=str(image_url)[:2000] if image_url else None, snippet=str(item.get("snippet", ""))[:4000], publisher=str(item.get("publisher", ""))[:255])
-        session.add(record)
-        stored.append(record)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=5) as client:
+        for item in data.get("references", [])[:6]:
+            source_url = str(item.get("source_url", ""))
+            if not await _reachable_url(client, source_url):
+                continue
+            image_url = item.get("image_url")
+            if image_url and not await _reachable_url(client, str(image_url), image=True):
+                image_url = None
+            record = VisualReference(project_id=project_id, generated_test_case_id=request.case_id, test_case_step_id=request.step_id, query=request.query, title=str(item.get("title", "Visual reference"))[:500], source_url=source_url, image_url=str(image_url)[:2000] if image_url else None, snippet=str(item.get("snippet", ""))[:4000], publisher=str(item.get("publisher", ""))[:255])
+            session.add(record)
+            stored.append(record)
     session.commit()
     for item in stored:
         session.refresh(item)
@@ -656,6 +682,12 @@ async def generate_project_step(
     *, session: SessionDep, current_user: CurrentUser, project_id: uuid.UUID, brief: str = Form("")
 ) -> ProjectGenerationResponse:
     project = _project_or_404(session, current_user, project_id)
+    # Generation performs a long external request. Lock the project row for the
+    # duration so a concurrent delete cannot invalidate the rows we persist after
+    # OpenAI returns.
+    project = session.exec(select(Project).where(Project.id == project.id).with_for_update()).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
     step = session.exec(
         select(QualificationStep)
         .where(QualificationStep.project_id == project.id, QualificationStep.status == "in_progress")
@@ -678,33 +710,40 @@ async def generate_project_step(
         for document in [*urs_documents, *design_documents]
     ]
     test_cases, source = await generate_cases_from_documents(source_documents, brief, step.stage)
-    run = GenerationRun(project_id=project.id, step_id=step.id, status="completed", model=source)
-    session.add(run)
-    session.flush()
-    stored_cases = [
-        GeneratedTestCase(
-            step_id=step.id,
-            test_case_id=test_case.test_case_id,
-            urs_id=test_case.urs_id,
-            title=test_case.title,
-            payload=test_case.model_dump(mode="json"),
-        )
-        for test_case in test_cases
-    ]
-    for stored_case in stored_cases:
-        session.add(stored_case)
-    session.flush()
-    for stored_case, test_case in zip(stored_cases, test_cases):
-        _link_case_requirement(session, stored_case, project.id)
-        for item in test_case.test_steps:
-            session.add(TestCaseStep(
-                generated_test_case_id=stored_case.id,
-                step_number=item.step_number,
-                action=item.action,
-                expected_result=item.expected_result,
-                evidence_required=item.evidence_required,
-            ))
-    session.commit()
+    try:
+        run = GenerationRun(project_id=project.id, step_id=step.id, status="completed", model=source)
+        session.add(run)
+        session.flush()
+        stored_cases = [
+            GeneratedTestCase(
+                step_id=step.id,
+                test_case_id=test_case.test_case_id,
+                urs_id=test_case.urs_id,
+                title=test_case.title,
+                payload=test_case.model_dump(mode="json"),
+            )
+            for test_case in test_cases
+        ]
+        for stored_case in stored_cases:
+            session.add(stored_case)
+        session.flush()
+        for stored_case, test_case in zip(stored_cases, test_cases):
+            _link_case_requirement(session, stored_case, project.id)
+            for item in test_case.test_steps:
+                session.add(TestCaseStep(
+                    generated_test_case_id=stored_case.id,
+                    step_number=item.step_number,
+                    action=item.action,
+                    expected_result=item.expected_result,
+                    evidence_required=item.evidence_required,
+                ))
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The project changed while test cases were being generated. Refresh the workflow and try again.",
+        ) from error
     session.refresh(run)
     return ProjectGenerationResponse(
         step=QualificationStepPublic.model_validate(step),

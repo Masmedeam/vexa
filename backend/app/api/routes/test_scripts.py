@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import PurePath
 from typing import Literal
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from openai import APIStatusError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.api.deps import CurrentUser
 from app.core.config import settings
@@ -147,6 +150,66 @@ or commentary. The object must contain one or more test_cases. This is a draft p
 human review and must never state that a test has passed or that a system is compliant."""
 
 
+OPENAI_INPUT_FILE_MAX_BYTES = 45 * 1024 * 1024
+
+
+def _docx_text(content: bytes) -> str:
+    """Extract readable DOCX text without adding a document parser dependency."""
+    try:
+        with ZipFile(BytesIO(content)) as archive:
+            xml_content = archive.read("word/document.xml")
+    except (BadZipFile, KeyError) as error:
+        raise HTTPException(status_code=422, detail="The DOCX document could not be read.") from error
+
+    root = ElementTree.fromstring(xml_content)
+    word_namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    paragraphs = []
+    for paragraph in root.iter(f"{word_namespace}p"):
+        text = "".join(node.text or "" for node in paragraph.iter(f"{word_namespace}t"))
+        if text.strip():
+            paragraphs.append(text.strip())
+    return "\n\n".join(paragraphs)
+
+
+def _document_chunks(
+    filename: str, content: bytes, max_bytes: int = OPENAI_INPUT_FILE_MAX_BYTES
+) -> list[tuple[str, bytes]]:
+    """Return OpenAI-safe upload parts, converting oversized DOCX files to text."""
+    if len(content) <= max_bytes:
+        return [(filename, content)]
+
+    suffix = PurePath(filename).suffix.lower()
+    if suffix == ".docx":
+        text = _docx_text(content)
+    elif suffix in {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}:
+        text = content.decode("utf-8", errors="replace")
+    else:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{filename} is larger than the 50 MB OpenAI input limit and cannot be safely chunked.",
+        )
+
+    if not text.strip():
+        raise HTTPException(status_code=422, detail=f"{filename} contains no readable text to generate from.")
+
+    chunks = []
+    chunk_number = 1
+    current: list[str] = []
+    current_bytes = 0
+    for paragraph in text.split("\n\n"):
+        paragraph_bytes = len((paragraph + "\n\n").encode("utf-8"))
+        if current and current_bytes + paragraph_bytes > max_bytes:
+            chunks.append((f"{filename}.part-{chunk_number:03d}.txt", "\n\n".join(current).encode("utf-8")))
+            chunk_number += 1
+            current = []
+            current_bytes = 0
+        current.append(paragraph)
+        current_bytes += paragraph_bytes
+    if current:
+        chunks.append((f"{filename}.part-{chunk_number:03d}.txt", "\n\n".join(current).encode("utf-8")))
+    return chunks
+
+
 def _openai_generation_error(error: APIStatusError) -> HTTPException:
     body = error.body if isinstance(error.body, dict) else {}
     code = body.get("code")
@@ -209,8 +272,9 @@ async def generate_cases_from_documents(
     uploaded_files = []
     try:
         for filename, content, document_type in documents:
-            uploaded = await client.files.create(file=(filename, BytesIO(content)), purpose="user_data")
-            uploaded_files.append((uploaded.id, filename, document_type))
+            for chunk_filename, chunk_content in _document_chunks(filename, content):
+                uploaded = await client.files.create(file=(chunk_filename, BytesIO(chunk_content)), purpose="user_data")
+                uploaded_files.append((uploaded.id, chunk_filename, document_type))
     except APIStatusError as error:
         raise _openai_generation_error(error) from error
     stage_instruction = (

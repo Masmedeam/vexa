@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from sqlmodel import select
 
-from app.api.deps import CurrentUser
+from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
+from app.models import GeneratedTestCase, Project, QualificationStep, TestCaseStep
 
 router = APIRouter(prefix="/realtime", tags=["realtime"])
 
@@ -17,6 +21,11 @@ class RealtimeContext(BaseModel):
     project_id: str
     stage: str
     steps: list[dict]
+
+
+class RealtimeRequest(BaseModel):
+    sdp: str
+    project_id: uuid.UUID
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -39,14 +48,59 @@ def _tools() -> list[dict]:
 
 
 @router.post("/session")
-async def create_realtime_session(request: Request, current_user: CurrentUser, voice_context: str = Header(..., alias="X-Voice-Context")) -> str:
+async def create_realtime_session(session: SessionDep, request: Request, current_user: CurrentUser, voice_context: str | None = Header(None, alias="X-Voice-Context")) -> PlainTextResponse:
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="Realtime voice is not configured")
-    try:
-        context = RealtimeContext.model_validate_json(voice_context)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail="Invalid voice context") from error
-    step_lines = "\n".join(f"- {item.get('id')}: step {item.get('step_number')}, {item.get('status')}: {item.get('action')}" for item in context.steps)
+    request_body = await request.body()
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            payload = RealtimeRequest.model_validate_json(request_body)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Invalid realtime session request") from error
+        sdp = payload.sdp
+        project_id = payload.project_id
+    else:
+        sdp = request_body.decode("utf-8")
+        if not voice_context:
+            raise HTTPException(status_code=422, detail="Realtime session requires voice context")
+        try:
+            legacy_context = RealtimeContext.model_validate_json(voice_context)
+            project_id = uuid.UUID(legacy_context.project_id)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(status_code=422, detail="Invalid voice context") from error
+
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.owner_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    active_step = session.exec(
+        select(QualificationStep)
+        .where(QualificationStep.project_id == project_id, QualificationStep.status == "in_progress")
+        .order_by(QualificationStep.order_index)
+    ).first()
+    if not active_step:
+        raise HTTPException(status_code=409, detail="There is no active qualification stage")
+    cases = session.exec(select(GeneratedTestCase).where(GeneratedTestCase.step_id == active_step.id)).all()
+    case_ids = [case.id for case in cases]
+    protocol_steps = session.exec(select(TestCaseStep).where(TestCaseStep.generated_test_case_id.in_(case_ids))).all() if case_ids else []
+    case_by_id = {case.id: case for case in cases}
+    context = RealtimeContext(
+        project_id=str(project_id),
+        stage=active_step.stage,
+        steps=[
+            {
+                "id": str(item.id),
+                "step_number": item.step_number,
+                "status": item.status,
+                "action": item.action,
+                "case_id": str(case_by_id[item.generated_test_case_id].id),
+                "case_title": case_by_id[item.generated_test_case_id].title,
+            }
+            for item in protocol_steps
+        ],
+    )
+    step_lines = "\n".join(f"- case {item.get('case_id')} / step {item.get('id')}: step {item.get('step_number')}, {item.get('status')}: {item.get('action')}" for item in context.steps)
     instructions = f"""You are Vexa's qualification workflow assistant. Help the user understand and execute the active qualification stage.\n
 Active stage: {context.stage}, project {context.project_id}. Each step line includes its test-case ID so always select the correct case before mutating it.\n
 Protocol steps and cases:\n{step_lines}\n
@@ -58,7 +112,7 @@ Rules:\n- Be concise and calm. Never claim regulatory compliance or that a test 
             response = await client.post(
                 "https://api.openai.com/v1/realtime/calls",
                 headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}", "OpenAI-Safety-Identifier": safety_id},
-                files={"sdp": (None, (await request.body()).decode("utf-8"), "application/sdp"), "session": (None, json.dumps(session), "application/json")},
+                files={"sdp": (None, sdp, "application/sdp"), "session": (None, json.dumps(session), "application/json")},
             )
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail="Unable to create realtime voice session") from error
@@ -81,4 +135,4 @@ Rules:\n- Be concise and calm. Never claim regulatory compliance or that a test 
         else:
             detail = f"OpenAI rejected the realtime voice session ({response.status_code})."
         raise HTTPException(status_code=502, detail=detail)
-    return response.text
+    return PlainTextResponse(response.text, media_type="application/sdp")

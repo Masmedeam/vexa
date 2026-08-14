@@ -1,30 +1,578 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
-import { ArrowLeft, FileUp, Play, RefreshCw } from "lucide-react"
+import { ArrowLeft, FileUp, Play, RefreshCw, Trash2 } from "lucide-react"
 import { useEffect, useState, type ChangeEvent } from "react"
-import { VoiceAssistant } from "@/components/VoiceAssistant"
 
-export const Route = createFileRoute("/_layout/projects/$projectId/")({ component: ProjectWorkflow, head: () => ({ meta: [{ title: "Project workflow - Vexa" }] }) })
+export const Route = createFileRoute("/_layout/projects/$projectId/")({
+  component: ProjectWorkflow,
+  head: () => ({ meta: [{ title: "Project workflow - Vexa" }] }),
+})
 type Project = { id: string; name: string; description?: string | null }
-type Document = { id: string; document_type: string; filename: string; version: number }
+type Document = {
+  id: string
+  document_type: string
+  filename: string
+  version: number
+}
 type Step = { id: string; stage: string; order_index: number; status: string }
-type Case = { id: string; test_case_id: string; title: string; step_id: string; payload: Record<string, any> }
-type Summary = { case_id: string; review_status?: string | null; completed_steps: number; total_steps: number; execution_status: string }
-type TraceCase = { id: string; test_case_id: string; title: string; stage: string; step_count: number; completed_steps: number; execution_status: string; review_status?: string | null }
-type TraceRequirement = { id: string; requirement_id: string; requirement_text: string; cases: TraceCase[] }
+type Case = {
+  id: string
+  test_case_id: string
+  title: string
+  step_id: string
+  payload: Record<string, any>
+}
+type Summary = {
+  case_id: string
+  review_status?: string | null
+  completed_steps: number
+  total_steps: number
+  execution_status: string
+}
+type TraceCase = {
+  id: string
+  test_case_id: string
+  title: string
+  stage: string
+  step_count: number
+  completed_steps: number
+  execution_status: string
+  review_status?: string | null
+}
+type TraceRequirement = {
+  id: string
+  requirement_id: string
+  requirement_text: string
+  cases: TraceCase[]
+}
 
-async function request(path: string, options: RequestInit = {}) { const headers = new Headers(options.headers); const token = localStorage.getItem("access_token"); if (token) headers.set("Authorization", `Bearer ${token}`); if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json"); const response = await fetch(`/api/v1${path}`, { ...options, headers }); if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || "Request failed"); return response.json() }
+async function request(path: string, options: RequestInit = {}) {
+  const headers = new Headers(options.headers)
+  const token = localStorage.getItem("access_token")
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+  if (
+    options.body &&
+    !(options.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  )
+    headers.set("Content-Type", "application/json")
+  const response = await fetch(`/api/v1${path}`, { ...options, headers })
+  if (!response.ok)
+    throw new Error(
+      (await response.json().catch(() => null))?.detail || "Request failed",
+    )
+  return response.json()
+}
 
 function ProjectWorkflow() {
-  const { projectId } = Route.useParams(); const [project, setProject] = useState<Project | null>(null); const [steps, setSteps] = useState<Step[]>([]); const [documents, setDocuments] = useState<Document[]>([]); const [cases, setCases] = useState<Case[]>([]); const [summaries, setSummaries] = useState<Record<string, Summary>>({}); const [traceability, setTraceability] = useState<TraceRequirement[]>([]); const [tab, setTab] = useState<"workflow" | "traceability">("workflow"); const [selectedStepId, setSelectedStepId] = useState(""); const [ursFiles, setUrsFiles] = useState<File[]>([]); const [designFiles, setDesignFiles] = useState<File[]>([]); const [busy, setBusy] = useState(false); const [loadingStage, setLoadingStage] = useState(""); const [error, setError] = useState("")
-  async function load() { try { const [p, s, d, c, summaryResult, traceResult] = await Promise.all([request(`/projects/${projectId}`), request(`/projects/${projectId}/steps`), request(`/projects/${projectId}/documents`), request(`/projects/${projectId}/test-cases`), request(`/projects/${projectId}/test-case-summaries`), request(`/projects/${projectId}/traceability`)]); setProject(p); setSteps(s); setDocuments(d); setCases(c); setSummaries(Object.fromEntries(summaryResult.map((item: Summary) => [item.case_id, item]))); setTraceability(traceResult); setSelectedStepId((current) => current || s.find((item: Step) => item.status === "in_progress")?.id || s.at(-1)?.id || "") } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load project") } }
-  useEffect(() => { void load() }, [projectId])
-  function selectFiles(event: ChangeEvent<HTMLInputElement>, setter: (files: File[]) => void) { setter(Array.from(event.target.files || [])) }
-  async function upload(files: File[], type: string) { if (!files.length) return; const body = new FormData(); body.append("document_type", type); files.forEach((file) => body.append("files", file)); setBusy(true); setError(""); try { await request(`/projects/${projectId}/documents`, { method: "POST", body }); if (type === "URS") setUrsFiles([]); else setDesignFiles([]); await load() } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to upload documents") } finally { setBusy(false) } }
-  async function generate() { setBusy(true); setError(""); try { const result = await request(`/projects/${projectId}/generate`, { method: "POST", body: new FormData() }); if (result.step?.id) setSelectedStepId(result.step.id); await load() } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to generate test cases") } finally { setBusy(false) } }
-  async function complete(step: Step) { setBusy(true); setError(""); try { const current = await request(`/projects/${projectId}/steps/${step.id}`, { method: "PATCH", body: JSON.stringify({ status: "completed" }) }); const nextStep = steps.find((item) => item.order_index === step.order_index + 1); if (nextStep) { setSelectedStepId(nextStep.id); setLoadingStage(nextStep.stage); setSteps((items) => items.map((item) => item.id === step.id ? current : item.id === nextStep.id ? { ...item, status: "in_progress" } : item)); await request(`/projects/${projectId}/generate`, { method: "POST", body: new FormData() }) }; await load() } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to complete stage") } finally { setBusy(false); setLoadingStage("") } }
-  const activeStep = steps.find((step) => step.status === "in_progress"); const selectedStep = steps.find((step) => step.id === selectedStepId) || activeStep; const selectedCases = selectedStep ? cases.filter((item) => item.step_id === selectedStep.id) : []; const hasUrs = documents.some((item) => item.document_type === "URS"); const hasDesign = documents.some((item) => item.document_type === "DESIGN_SPEC"); const missingDocuments = [!hasUrs ? "URS" : "", !hasDesign ? "design specification" : ""].filter(Boolean)
-  const picker = (id: string, label: string, files: File[], setter: (files: File[]) => void, type: string) => <div className="grid gap-2"><span className="text-sm font-medium">{label}</span><label htmlFor={id} className="flex cursor-pointer items-center gap-3 rounded-md border border-dashed border-border bg-background px-3 py-3 text-sm hover:bg-muted"><FileUp className="size-4" /><span>{files.length ? `${files.length} selected` : "Choose files"}</span><input id={id} className="sr-only" type="file" multiple accept=".pdf,.doc,.docx,.txt,.md" onChange={(event) => selectFiles(event, setter)} /></label>{files.length > 0 && <button type="button" disabled={busy} onClick={() => upload(files, type)} className="inline-flex w-fit items-center gap-2 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-700 dark:text-sky-300"><FileUp className="size-3.5" />Upload {label.toLowerCase()}</button>}</div>
-  if (!project) return <p className="text-sm text-muted-foreground">{error || "Loading project…"}</p>
-  const voiceCases = selectedCases.map((item) => ({ id: item.id, title: item.title }))
-  return <div className="mx-auto flex max-w-7xl flex-col gap-6"><div><Link to="/projects" className="mb-4 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" /> Projects</Link><h1 className="text-2xl font-semibold tracking-tight">{project.name}</h1><p className="text-muted-foreground">{project.description || "Qualification workflow"}</p></div>{error && <p className="text-sm text-destructive" role="alert">{error}</p>}<div className="flex gap-1 rounded-lg border border-border bg-card p-1"><button type="button" onClick={() => setTab("workflow")} className={`rounded-md px-3 py-2 text-sm ${tab === "workflow" ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted"}`}>Workflow</button><button type="button" onClick={() => setTab("traceability")} className={`rounded-md px-3 py-2 text-sm ${tab === "traceability" ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted"}`}>Traceability</button></div><section className={tab === "workflow" ? "grid gap-3 md:grid-cols-4" : "hidden"}>{steps.map((step) => <button type="button" key={step.id} onClick={() => setSelectedStepId(step.id)} className={`rounded-lg border p-4 text-left transition-colors hover:bg-muted ${selectedStep?.id === step.id ? "border-foreground" : "border-border"} ${loadingStage === step.stage ? "animate-pulse border-foreground bg-muted" : ""}`}><p className="text-xs text-muted-foreground">Step {step.order_index}</p><h2 className="mt-1 text-lg font-medium">{step.stage}</h2><p className="mt-2 text-xs capitalize text-muted-foreground">{loadingStage === step.stage ? `Generating ${step.stage}…` : step.status.replace("_", " ")}</p></button>)}</section><section className={tab === "workflow" ? "grid gap-6 lg:grid-cols-[minmax(0,340px)_1fr]" : "hidden"}><div className="rounded-lg border border-border bg-card p-5"><h2 className="font-medium">Source documents</h2><p className="mt-1 text-sm text-muted-foreground">Both document types are required before generation.</p><div className="mt-5 grid gap-4">{picker("urs-upload", "URS files", ursFiles, setUrsFiles, "URS")}{picker("design-upload", "Design files", designFiles, setDesignFiles, "DESIGN_SPEC")}</div><div className="mt-6 border-t border-border pt-4"><p className="mb-2 text-xs font-medium">Uploaded documents</p><ul className="grid gap-2 text-xs">{documents.map((item) => <li key={item.id} className="flex justify-between gap-2"><span className="truncate">{item.filename}</span><span className="shrink-0 text-muted-foreground">{item.document_type === "DESIGN_SPEC" ? "Design" : "URS"} · v{item.version}</span></li>)}</ul></div></div><div className="rounded-lg border border-border bg-card p-5"><div className="flex items-start justify-between gap-4"><div><h2 className="font-medium">{selectedStep?.stage || "Qualification"}</h2><p className="mt-1 text-sm text-muted-foreground">{selectedStep ? "Open a test case to review or execute it." : "Select a stage."}</p></div><div className="flex items-center gap-2">{activeStep && selectedStep?.id === activeStep.id && <button type="button" disabled={busy || !hasUrs || !hasDesign} onClick={() => selectedCases.length ? complete(activeStep) : generate()} className="inline-flex items-center gap-2 rounded-md bg-foreground px-3 py-2 text-sm text-background disabled:opacity-50">{busy ? <RefreshCw className="size-4 animate-spin" /> : <Play className="size-4" />}{selectedCases.length ? "Complete and generate next" : "Create"}</button>}{selectedStep && <VoiceAssistant projectId={projectId} stage={selectedStep.stage} cases={voiceCases} onChanged={() => void load()} />}</div></div>{activeStep && missingDocuments.length > 0 && <p className="mt-4 text-xs text-muted-foreground">Add and upload {missingDocuments.join(" and ")} to enable creation.</p>}{selectedCases.length === 0 ? <p className="mt-8 text-sm text-muted-foreground">No test cases for this stage.</p> : <div className="mt-6 grid gap-2">{selectedCases.map((item) => { const summary = summaries[item.id]; return <Link key={item.id} to="/projects/$projectId/cases/$caseId" params={{ projectId, caseId: item.id }} className="rounded-md border border-border p-4 transition-colors hover:bg-muted"><div className="flex items-center justify-between gap-3"><p className="text-xs text-muted-foreground">{item.test_case_id} · {item.payload.risk_level || "Unclassified risk"}</p><p className={`text-xs ${summary?.execution_status === "passed" ? "text-emerald-600" : summary?.execution_status === "failed" ? "text-red-600" : "text-muted-foreground"}`}>{summary ? `${summary.completed_steps}/${summary.total_steps} steps · ${summary.execution_status}` : "Not started"}</p></div><p className="mt-1 font-medium">{item.title}</p><p className="mt-2 text-xs text-muted-foreground">{summary?.review_status ? `Review: ${summary.review_status.replace("_", " ")}` : "Not reviewed"} · Open test case →</p></Link>})}</div>}</div></section><section className={tab === "traceability" ? "overflow-hidden rounded-lg border border-border bg-card" : "hidden"}><div className="border-b border-border p-4"><h2 className="font-medium">URS traceability</h2><p className="mt-1 text-sm text-muted-foreground">Every requirement should link to one or more generated test cases.</p></div>{traceability.length === 0 ? <p className="p-6 text-sm text-muted-foreground">No requirement mappings are available yet.</p> : <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead className="border-b border-border text-xs text-muted-foreground"><tr><th className="px-4 py-3">URS requirement</th><th className="px-4 py-3">Stage</th><th className="px-4 py-3">Test case</th><th className="px-4 py-3">Execution</th><th className="px-4 py-3">Review</th></tr></thead><tbody>{traceability.flatMap((requirement) => requirement.cases.length ? requirement.cases.map((item, index) => <tr key={`${requirement.id}-${item.id}`} className="border-b border-border/60 align-top"><td className="px-4 py-3"><p className="font-medium">{requirement.requirement_id}</p><p className="mt-1 max-w-sm text-xs text-muted-foreground">{index === 0 ? requirement.requirement_text : "↳ same requirement"}</p></td><td className="px-4 py-3">{item.stage}</td><td className="px-4 py-3"><Link to="/projects/$projectId/cases/$caseId" params={{ projectId, caseId: item.id }} className="font-medium hover:underline">{item.test_case_id}</Link><p className="mt-1 text-xs text-muted-foreground">{item.title}</p><p className="mt-1 text-xs text-muted-foreground">{item.completed_steps}/{item.step_count} steps</p></td><td className="px-4 py-3 capitalize text-muted-foreground">{item.execution_status.replace("_", " ")}</td><td className="px-4 py-3 capitalize text-muted-foreground">{item.review_status?.replace("_", " ") || "not reviewed"}</td></tr>) : [<tr key={requirement.id} className="border-b border-border/60"><td className="px-4 py-3"><p className="font-medium">{requirement.requirement_id}</p><p className="mt-1 text-xs text-muted-foreground">{requirement.requirement_text}</p></td><td className="px-4 py-3 text-muted-foreground" colSpan={4}>Unmapped</td></tr>])}</tbody></table></div>}</section></div>
+  const { projectId } = Route.useParams()
+  const [project, setProject] = useState<Project | null>(null)
+  const [steps, setSteps] = useState<Step[]>([])
+  const [documents, setDocuments] = useState<Document[]>([])
+  const [cases, setCases] = useState<Case[]>([])
+  const [summaries, setSummaries] = useState<Record<string, Summary>>({})
+  const [traceability, setTraceability] = useState<TraceRequirement[]>([])
+  const [tab, setTab] = useState<"workflow" | "traceability">("workflow")
+  const [selectedStepId, setSelectedStepId] = useState("")
+  const [ursFiles, setUrsFiles] = useState<File[]>([])
+  const [designFiles, setDesignFiles] = useState<File[]>([])
+  const [busy, setBusy] = useState(false)
+  const [loadingStage, setLoadingStage] = useState("")
+  const [error, setError] = useState("")
+  async function load() {
+    try {
+      const [p, s, d, c, summaryResult, traceResult] = await Promise.all([
+        request(`/projects/${projectId}`),
+        request(`/projects/${projectId}/steps`),
+        request(`/projects/${projectId}/documents`),
+        request(`/projects/${projectId}/test-cases`),
+        request(`/projects/${projectId}/test-case-summaries`),
+        request(`/projects/${projectId}/traceability`),
+      ])
+      setProject(p)
+      setSteps(s)
+      setDocuments(d)
+      setCases(c)
+      setSummaries(
+        Object.fromEntries(
+          summaryResult.map((item: Summary) => [item.case_id, item]),
+        ),
+      )
+      setTraceability(traceResult)
+      setSelectedStepId(
+        (current) =>
+          current ||
+          s.find((item: Step) => item.status === "in_progress")?.id ||
+          s.at(-1)?.id ||
+          "",
+      )
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to load project",
+      )
+    }
+  }
+  useEffect(() => {
+    void load()
+    const refresh = (event: Event) => {
+      if (
+        (event as CustomEvent<{ projectId: string }>).detail?.projectId ===
+        projectId
+      )
+        void load()
+    }
+    window.addEventListener("vexa:voice-updated", refresh)
+    return () => window.removeEventListener("vexa:voice-updated", refresh)
+  }, [projectId])
+  function selectFiles(
+    event: ChangeEvent<HTMLInputElement>,
+    setter: (files: File[]) => void,
+    type: string,
+  ) {
+    const files = Array.from(event.target.files || [])
+    event.currentTarget.value = ""
+    setter(files)
+    void upload(files, type)
+  }
+  async function upload(files: File[], type: string) {
+    if (!files.length) return
+    const body = new FormData()
+    body.append("document_type", type)
+    files.forEach((file) => body.append("files", file))
+    setBusy(true)
+    setError("")
+    try {
+      await request(`/projects/${projectId}/documents`, {
+        method: "POST",
+        body,
+      })
+      if (type === "URS") setUrsFiles([])
+      else setDesignFiles([])
+      await load()
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to upload documents",
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function removeDocument(document: Document) {
+    setBusy(true)
+    setError("")
+    try {
+      await request(`/projects/${projectId}/documents/${document.id}`, {
+        method: "DELETE",
+      })
+      await load()
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to remove document",
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function generate() {
+    setBusy(true)
+    setError("")
+    try {
+      const result = await request(`/projects/${projectId}/generate`, {
+        method: "POST",
+        body: new FormData(),
+      })
+      if (result.step?.id) setSelectedStepId(result.step.id)
+      await load()
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to generate test cases",
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function complete(step: Step) {
+    setBusy(true)
+    setError("")
+    try {
+      const current = await request(`/projects/${projectId}/steps/${step.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "completed" }),
+      })
+      const nextStep = steps.find(
+        (item) => item.order_index === step.order_index + 1,
+      )
+      if (nextStep) {
+        setSelectedStepId(nextStep.id)
+        setLoadingStage(nextStep.stage)
+        setSteps((items) =>
+          items.map((item) =>
+            item.id === step.id
+              ? current
+              : item.id === nextStep.id
+                ? { ...item, status: "in_progress" }
+                : item,
+          ),
+        )
+        await request(`/projects/${projectId}/generate`, {
+          method: "POST",
+          body: new FormData(),
+        })
+      }
+      await load()
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to complete stage",
+      )
+    } finally {
+      setBusy(false)
+      setLoadingStage("")
+    }
+  }
+  const activeStep = steps.find((step) => step.status === "in_progress")
+  const selectedStep =
+    steps.find((step) => step.id === selectedStepId) || activeStep
+  const selectedCases = selectedStep
+    ? cases.filter((item) => item.step_id === selectedStep.id)
+    : []
+  const hasUrs = documents.some((item) => item.document_type === "URS")
+  const hasDesign = documents.some(
+    (item) => item.document_type === "DESIGN_SPEC",
+  )
+  const missingDocuments = [
+    !hasUrs ? "URS" : "",
+    !hasDesign ? "design specification" : "",
+  ].filter(Boolean)
+  const picker = (
+    id: string,
+    label: string,
+    files: File[],
+    setter: (files: File[]) => void,
+    type: string,
+  ) => (
+    <div className="grid gap-2">
+      <span className="text-sm font-medium">{label}</span>
+      <label
+        htmlFor={id}
+        className={`flex cursor-pointer items-center gap-3 rounded-md border border-dashed border-border bg-background px-3 py-3 text-sm hover:bg-muted ${busy ? "pointer-events-none opacity-60" : ""}`}
+      >
+        <FileUp className="size-4" />
+        <span>
+          {files.length
+            ? `Uploading ${files.length} file${files.length === 1 ? "" : "s"}…`
+            : "Choose files — upload starts immediately"}
+        </span>
+        <input
+          id={id}
+          className="sr-only"
+          disabled={busy}
+          type="file"
+          multiple
+          accept=".pdf,.doc,.docx,.txt,.md"
+          onChange={(event) => selectFiles(event, setter, type)}
+        />
+      </label>
+    </div>
+  )
+  if (!project)
+    return (
+      <p className="text-sm text-muted-foreground">
+        {error || "Loading project…"}
+      </p>
+    )
+  return (
+    <div className="mx-auto flex max-w-7xl flex-col gap-6">
+      <div>
+        <Link
+          to="/projects"
+          className="mb-4 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="size-4" /> Projects
+        </Link>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {project.name}
+        </h1>
+        <p className="text-muted-foreground">
+          {project.description || "Qualification workflow"}
+        </p>
+      </div>
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
+        <button
+          type="button"
+          onClick={() => setTab("workflow")}
+          className={`rounded-md px-3 py-2 text-sm ${tab === "workflow" ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted"}`}
+        >
+          Workflow
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("traceability")}
+          className={`rounded-md px-3 py-2 text-sm ${tab === "traceability" ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted"}`}
+        >
+          Traceability
+        </button>
+      </div>
+      <section
+        className={tab === "workflow" ? "grid gap-3 md:grid-cols-4" : "hidden"}
+      >
+        {steps.map((step) => (
+          <button
+            type="button"
+            key={step.id}
+            onClick={() => setSelectedStepId(step.id)}
+            className={`rounded-lg border p-4 text-left transition-colors hover:bg-muted ${selectedStep?.id === step.id ? "border-foreground" : "border-border"} ${loadingStage === step.stage ? "animate-pulse border-foreground bg-muted" : ""}`}
+          >
+            <p className="text-xs text-muted-foreground">
+              Step {step.order_index}
+            </p>
+            <h2 className="mt-1 text-lg font-medium">{step.stage}</h2>
+            <p className="mt-2 text-xs capitalize text-muted-foreground">
+              {loadingStage === step.stage
+                ? `Generating ${step.stage}…`
+                : step.status.replace("_", " ")}
+            </p>
+          </button>
+        ))}
+      </section>
+      <section
+        className={
+          tab === "workflow"
+            ? "grid gap-6 lg:grid-cols-[minmax(0,340px)_1fr]"
+            : "hidden"
+        }
+      >
+        <div className="rounded-lg border border-border bg-card p-5">
+          <h2 className="font-medium">Source documents</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Both document types are required before generation.
+          </p>
+          <div className="mt-5 grid gap-4">
+            {picker("urs-upload", "URS files", ursFiles, setUrsFiles, "URS")}
+            {picker(
+              "design-upload",
+              "Design files",
+              designFiles,
+              setDesignFiles,
+              "DESIGN_SPEC",
+            )}
+          </div>
+          <div className="mt-6 border-t border-border pt-4">
+            <p className="mb-2 text-xs font-medium">Uploaded documents</p>
+            <ul className="grid gap-2 text-xs">
+              {documents.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <span className="truncate">{item.filename}</span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-muted-foreground">
+                      {item.document_type === "DESIGN_SPEC" ? "Design" : "URS"} ·
+                      v{item.version}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void removeDocument(item)}
+                      className="rounded p-1 text-muted-foreground hover:bg-red-500/10 hover:text-red-600 disabled:opacity-50"
+                      aria-label={`Remove ${item.filename}`}
+                      title="Remove document"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="font-medium">
+                {selectedStep?.stage || "Qualification"}
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {selectedStep
+                  ? "Open a test case to review or execute it."
+                  : "Select a stage."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {activeStep && selectedStep?.id === activeStep.id && (
+                <button
+                  type="button"
+                  disabled={busy || !hasUrs || !hasDesign}
+                  onClick={() =>
+                    selectedCases.length ? complete(activeStep) : generate()
+                  }
+                  className="inline-flex items-center gap-2 rounded-md bg-foreground px-3 py-2 text-sm text-background disabled:opacity-50"
+                >
+                  {busy ? (
+                    <RefreshCw className="size-4 animate-spin" />
+                  ) : (
+                    <Play className="size-4" />
+                  )}
+                  {selectedCases.length
+                    ? "Complete and generate next"
+                    : "Create"}
+                </button>
+              )}
+            </div>
+          </div>
+          {activeStep && missingDocuments.length > 0 && (
+            <p className="mt-4 text-xs text-muted-foreground">
+              Add and upload {missingDocuments.join(" and ")} to enable
+              creation.
+            </p>
+          )}
+          {selectedCases.length === 0 ? (
+            <p className="mt-8 text-sm text-muted-foreground">
+              No test cases for this stage.
+            </p>
+          ) : (
+            <div className="mt-6 grid gap-2">
+              {selectedCases.map((item) => {
+                const summary = summaries[item.id]
+                return (
+                  <Link
+                    key={item.id}
+                    to="/projects/$projectId/cases/$caseId"
+                    params={{ projectId, caseId: item.id }}
+                    className="rounded-md border border-border p-4 transition-colors hover:bg-muted"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs text-muted-foreground">
+                        {item.test_case_id} ·{" "}
+                        {item.payload.risk_level || "Unclassified risk"}
+                      </p>
+                      <p
+                        className={`text-xs ${summary?.execution_status === "passed" ? "text-emerald-600" : summary?.execution_status === "failed" ? "text-red-600" : "text-muted-foreground"}`}
+                      >
+                        {summary
+                          ? `${summary.completed_steps}/${summary.total_steps} steps · ${summary.execution_status}`
+                          : "Not started"}
+                      </p>
+                    </div>
+                    <p className="mt-1 font-medium">{item.title}</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {summary?.review_status
+                        ? `Review: ${summary.review_status.replace("_", " ")}`
+                        : "Not reviewed"}{" "}
+                      · Open test case →
+                    </p>
+                  </Link>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+      <section
+        className={
+          tab === "traceability"
+            ? "overflow-hidden rounded-lg border border-border bg-card"
+            : "hidden"
+        }
+      >
+        <div className="border-b border-border p-4">
+          <h2 className="font-medium">URS traceability</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Every requirement should link to one or more generated test cases.
+          </p>
+        </div>
+        {traceability.length === 0 ? (
+          <p className="p-6 text-sm text-muted-foreground">
+            No requirement mappings are available yet.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left text-sm">
+              <thead className="border-b border-border text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-4 py-3">URS requirement</th>
+                  <th className="px-4 py-3">Stage</th>
+                  <th className="px-4 py-3">Test case</th>
+                  <th className="px-4 py-3">Execution</th>
+                  <th className="px-4 py-3">Review</th>
+                </tr>
+              </thead>
+              <tbody>
+                {traceability.flatMap((requirement) =>
+                  requirement.cases.length
+                    ? requirement.cases.map((item, index) => (
+                        <tr
+                          key={`${requirement.id}-${item.id}`}
+                          className="border-b border-border/60 align-top"
+                        >
+                          <td className="px-4 py-3">
+                            <p className="font-medium">
+                              {requirement.requirement_id}
+                            </p>
+                            <p className="mt-1 max-w-sm text-xs text-muted-foreground">
+                              {index === 0
+                                ? requirement.requirement_text
+                                : "↳ same requirement"}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3">{item.stage}</td>
+                          <td className="px-4 py-3">
+                            <Link
+                              to="/projects/$projectId/cases/$caseId"
+                              params={{ projectId, caseId: item.id }}
+                              className="font-medium hover:underline"
+                            >
+                              {item.test_case_id}
+                            </Link>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {item.title}
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {item.completed_steps}/{item.step_count} steps
+                            </p>
+                          </td>
+                          <td className="px-4 py-3 capitalize text-muted-foreground">
+                            {item.execution_status.replace("_", " ")}
+                          </td>
+                          <td className="px-4 py-3 capitalize text-muted-foreground">
+                            {item.review_status?.replace("_", " ") ||
+                              "not reviewed"}
+                          </td>
+                        </tr>
+                      ))
+                    : [
+                        <tr
+                          key={requirement.id}
+                          className="border-b border-border/60"
+                        >
+                          <td className="px-4 py-3">
+                            <p className="font-medium">
+                              {requirement.requirement_id}
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {requirement.requirement_text}
+                            </p>
+                          </td>
+                          <td
+                            className="px-4 py-3 text-muted-foreground"
+                            colSpan={4}
+                          >
+                            Unmapped
+                          </td>
+                        </tr>,
+                      ],
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  )
 }
